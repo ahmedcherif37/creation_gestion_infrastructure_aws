@@ -1,5 +1,9 @@
 # Création et Gestion de l'infrastructure cloud de mon entreprise
 
+<div align="center">
+    <img src="images/infra1.png" alt="infra" width="80%" height="80%">
+</div>
+
 Installer un serveur WordPress (le site de l’entreprise) sur AWS en utilisant :
 ```
 •	RDS pour le stockage de la base de données
