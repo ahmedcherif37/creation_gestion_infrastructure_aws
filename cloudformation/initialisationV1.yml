@@ -1,0 +1,194 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  creation d une instance contenant docker 
+
+Parameters:
+  MyVpcId: 
+    Description: VPC id 
+    Type: AWS::EC2::VPC::Id
+
+  SubnetId1:
+    Description: choisir le premier sous reseaux public
+    Type: AWS::EC2::Subnet::Id 
+ 
+  SubnetId2:
+    Description: choisr le deuxième sous réseaux public 
+    Type: AWS::EC2::Subnet::Id
+
+Resources:
+  WebsiteEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 security group
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref WebsiteLoadBalancerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: '2375'
+          ToPort: '2375'
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref MyVpcId
+  WebsiteLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      AssociatePublicIpAddress: true
+      ImageId: ami-0874dad5025ca362c
+      InstanceType: t2.micro
+      SecurityGroups:
+        - !Ref WebsiteEC2SecurityGroup
+      UserData:    
+         Fn::Base64: !Sub
+          - |
+            #!/bin/bash -xe
+            sudo apt-get update -y
+            sudo apt-get install \
+                 ca-certificates \
+                 curl \
+                 gnupg \
+                 lsb-release -y
+            sudo curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+            echo \
+                "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian \
+                $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            sudo apt-get update
+            sudo apt-get install docker-ce docker-ce-cli containerd.io -y
+            sudo curl -L https://github.com/docker/compose/releases/download/1.25.3/docker-compose-`uname -s`-`uname -m` -o /usr/local/bin/docker-compose
+            sudo chmod +x /usr/local/bin/docker-compose
+            sudo echo ${adresse} >> /home/admin/b.txt
+            sudo docker volume create wordpress
+            sudo tee /home/admin/docker-compose.yaml << EOF 
+                version: '3.7'
+                services:
+                   wordpress:
+                     image: wordpress:latest
+                     ports:
+                       - 80:80
+                     restart: always
+                     environment:
+                        - WORDPRESS_DB_HOST=wordpress.amazonaws.com
+                        - WORDPRESS_DB_PORT=3306
+                        - WORDPRESS_DB_USER=admin
+                        - WORDPRESS_DB_PASSWORD=22601523
+                        - WORDPRESS_DB_NAME=wordpress
+                     volumes:
+                        - wordpress:/var/www/html
+                volumes:
+                  wordpress:
+                    external: true
+            EOF
+            sudo sed -i "s/wordpress.amazonaws.com/"${adresse}"/" /home/admin/docker-compose.yaml
+            cd /home/admin/ && sudo docker-compose up -d
+            cat <<EOT >> /home/admin/credfile.txt
+            define( 'AS3CF_SETTINGS', serialize( array (
+                  'provider' => 'aws',
+                  'access-key-id' => '${idk}',
+                  'secret-access-key' => '${accek}',
+                  ) ) );
+            EOT
+            sudo docker cp credfile.txt $(sudo docker container ls -q):/var/www/html/   
+            sudo tee /home/admin/plugin.sh << EOF 
+            #!/bin/bash
+            curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar 
+            chmod +x wp-cli.phar 
+            mv wp-cli.phar /usr/local/bin/wp
+            cd wp-content/plugins/ 
+            wp plugin install https://downloads.wordpress.org/plugin/amazon-s3-and-cloudfront.2.5.5.zip --allow-root
+            wp plugin activate amazon-s3-and-cloudfront --allow-root
+            cd /var/www/html/
+            sed -i -e '/WORDPRESS_DEBUG/r credfile.txt' wp-config.php
+            EOF
+            chmod +x /home/admin/plugin.sh
+            sudo docker cp plugin.sh $(sudo docker container ls -q):/var/www/html/
+            #sudo docker exec -ti $(sudo docker container ls -q) bash -c "/var/www/html/plugin.sh"
+            #sudo docker-compose down && sudo docker-compose up -d 
+            #sudo docker exec $(sudo docker container ls -q) /bin/bash -c "sh  /var/www/html/plugin.sh"    
+          - adresse: !ImportValue addresseDB
+            idk: !ImportValue KeyId
+            accek: !ImportValue AccessKey
+
+  WebsiteScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchConfigurationName: !Ref WebsiteLaunchConfig
+      AvailabilityZones:
+        - Fn::Select:
+          - 0
+          - Fn::GetAZs: !Ref AWS::Region
+        - Fn::Select:
+          - 1
+          - Fn::GetAZs: !Ref AWS::Region
+      VPCZoneIdentifier:
+        - !Ref SubnetId1
+        - !Ref SubnetId2
+      DesiredCapacity: 1
+      MaxSize: 4
+      MinSize: 1
+      TargetGroupARNs:
+        - !Ref WebsiteTargetGroup
+ 
+# creation de target group
+  WebsiteTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref MyVpcId
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: true
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: 3600
+ # creation de loadbalencer 
+  WebsiteLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref WebsiteLoadBalancerSecurityGroup
+      Subnets: 
+        - !Ref SubnetId1
+        - !Ref SubnetId2
+ 
+ #creation de securité groupe de loadbalencer
+  WebsiteLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Website EC2 security group 
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref MyVpcId
+ 
+ # creation d'un ecouteur de loadbalencer
+  WebsiteLoadBlancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties: 
+      LoadBalancerArn: !Ref WebsiteLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebsiteTargetGroup
+Outputs:
+  dnsload:
+    Description: DNS LoadBalancer
+    Value:  !GetAtt WebsiteLoadBalancer.DNSName

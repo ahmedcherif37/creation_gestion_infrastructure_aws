@@ -1,0 +1,231 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  AWS CloudFormation VPC Template
+Resources:
+# creation d'un VPC
+  MonSuperVPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      Tags:
+        - Key: Name
+          Value: 'MainVPC'
+
+# création des 2 sous réseau public
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+       - 0
+       - Fn::GetAZs: !Ref 'AWS::Region'
+      CidrBlock: 10.0.100.0/24
+      Tags:
+       - Key: Name
+         Value: 'MainVPC-public-a'
+      VpcId: !Ref MonSuperVPC
+      
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+       - 1
+       - Fn::GetAZs: !Ref 'AWS::Region'
+      CidrBlock: 10.0.101.0/24
+      Tags:
+       - Key: Name
+         Value: 'MainVPC-public-b'
+      VpcId: !Ref MonSuperVPC
+ 
+ # creation d'un sous réseau privé
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+       - 0
+       - Fn::GetAZs: !Ref 'AWS::Region'
+      CidrBlock: 10.0.0.0/24
+      Tags:
+       - Key: Name
+         Value: 'MainVPC-private-a'
+      VpcId: !Ref MonSuperVPC
+  
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+       - 1
+       - Fn::GetAZs: !Ref 'AWS::Region'
+      CidrBlock: 10.0.1.0/24
+      Tags:
+       - Key: Name
+         Value: 'MainVPC-private-b'
+      VpcId: !Ref MonSuperVPC
+ 
+ # creation d'une passerelle de sortie vers Internet
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+       - Key: Name
+         Value: 'MainVPC-InternetGateway'
+         
+  AttachInternetGateway:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref MonSuperVPC
+      InternetGatewayId: !Ref InternetGateway
+      
+ 
+ # création d'une route pour le réseau public A pour la sortie à Internet
+  PublicRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MonSuperVPC
+      Tags:
+        - Key: Name
+          Value: MainVPC-route-public-a
+  
+  AttachPublicRouteTableA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTableA
+      SubnetId: !Ref PublicSubnetA
+      
+  PublicRouteA:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTableA
+
+ # création d'une route pour le réseau public B pour la sortie à Internet
+  PublicRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MonSuperVPC
+      Tags:
+        - Key: Name
+          Value: MainVPC-route-public-b
+  
+  AttachPublicRouteTableB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTableB
+      SubnetId: !Ref PublicSubnetB
+      
+  PublicRouteB:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTableB
+
+# creation des reseaux d'une base de donnees
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet Group for RDS
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      Tags:
+        - Key: Name
+          Value: database subnets
+  
+  # creation de la base de données
+  DatabaseInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: "wordpress"
+      DBName: "wordpress"
+      Engine: MySQL
+      EngineVersion: 5.7.31
+      MasterUsername: "admin"
+      MasterUserPassword: "22601523"
+      DBInstanceClass: db.t2.micro
+      AllocatedStorage: '5'
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MultiAZ: false
+      Port: 3306
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt DatabaseSG.GroupId
+      #DBSecurityGroups: 
+      # - !Ref DatabaseSG
+
+  # creation de securite groupe pour la base de données
+  DatabaseSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for RDS public access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref MonSuperVPC
+# creation de S3 bucket
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: "mon-repo-wordpress"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+# creation utilisateur S3
+  S3User:
+    Type: AWS::IAM::User
+    Properties:
+      Policies:
+        - PolicyName: bucket-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - s3:*
+              Resource:
+                - !Sub arn:aws:s3:::${S3Bucket}
+                - !Sub arn:aws:s3:::${S3Bucket}/*                       
+  S3UserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref S3User
+# variable exporter
+Outputs:
+  JDBCConnectionString:
+    Description: JDBC connection string for the database
+    #Value: !Join ['', [!GetAtt [DatabaseInstance, Endpoint.Address]]]
+    Value: !GetAtt [DatabaseInstance, Endpoint.Address]
+    Export:
+      Name: "addresseDB"
+  
+  AccessKeyID:
+    Description: key Id
+    Value: !Ref S3UserAccessKey
+    Export:
+      Name: "KeyId"
+  
+  SecretAccessKey:
+    Description: secret access key
+    Value: !GetAtt S3UserAccessKey.SecretAccessKey
+    Export:
+      Name: "AccessKey"
+  
+  BucketName:
+    Description: S3 bucket
+    Value: !Ref S3Bucket
+    Export:
+      Name: "S3Bucket"
+  
+  User:
+    Description: S3 user
+    Value: !Ref S3User
+    Export:
+      Name: "S3User"
